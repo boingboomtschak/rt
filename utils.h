@@ -116,3 +116,106 @@ inline const char* vkDeviceTypeString(VkPhysicalDeviceType type) {
             break;
     }
 }
+
+bool checkDeviceExtensionSupport(VkPhysicalDevice device, std::vector<const char*> deviceExtensions) {
+    uint32_t extensionCount;
+    vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount, nullptr);
+    std::vector<VkExtensionProperties> availableExtensions(extensionCount);
+    vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount, availableExtensions.data());
+    std::set<const char*> requiredExtensions(deviceExtensions.begin(), deviceExtensions.end());
+    for (VkExtensionProperties ext : availableExtensions) {
+        requiredExtensions.erase(ext.extensionName);
+    }
+    return requiredExtensions.empty();
+}
+
+uint32_t findMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFilter, VkMemoryPropertyFlags properties) {
+    VkPhysicalDeviceMemoryProperties memProperties;
+    vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
+    for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
+        if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
+            return i;
+        }
+    }
+    throw std::runtime_error("failed to find suitable memory type!");
+}
+
+struct Device {
+    VkPhysicalDevice physicalDevice;
+    VkDevice device;
+    VkQueue queue;
+};
+
+struct Buffer {
+    VkBuffer buffer;
+    VkDeviceMemory memory;
+};
+
+void createBuffer(Device device, VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, Buffer& buffer) {
+    VkBufferCreateInfo bufferCI {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size = size,
+        .usage = usage,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE
+    };
+    vkCheck(vkCreateBuffer(device.device, &bufferCI, nullptr, &buffer.buffer));
+    
+    VkMemoryRequirements memRequirements;
+    vkGetBufferMemoryRequirements(device.device, buffer.buffer, &memRequirements);
+
+    VkMemoryAllocateInfo allocInfo {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize = memRequirements.size,
+        .memoryTypeIndex = findMemoryType(device.physicalDevice, memRequirements.memoryTypeBits, properties)
+    };
+    vkCheck(vkAllocateMemory(device.device, &allocInfo, nullptr, &buffer.memory));
+    vkCheck(vkBindBufferMemory(device.device, buffer.buffer, buffer.memory, 0));
+}
+
+void destroyBuffer(Device device, Buffer buffer) {
+    vkDestroyBuffer(device.device, buffer.buffer, nullptr);
+    vkFreeMemory(device.device, buffer.memory, nullptr);
+}
+
+VkDeviceAddress getBufferDeviceAddress(VkDevice device, VkBuffer buffer) {
+    VkBufferDeviceAddressInfo bufferDeviceAddressInfo {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
+        .buffer = buffer.buffer
+    };
+    return vkGetBufferDeviceAddress(device.device, &bufferDeviceAddressInfo);
+}
+
+void copyBuffer(Device device, VkCommandPool commandPool, Buffer srcBuffer, Buffer dstBuffer, VkDeviceSize size) {
+    VkCommandBufferAllocateInfo allocInfo {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool = commandPool,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = 1
+    };
+    VkCommandBuffer commandBuffer;
+    vkCheck(vkAllocateCommandBuffers(device.device, &allocInfo, &commandBuffer));
+
+    VkCommandBufferBeginInfo  beginInfo {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, 
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
+    };
+    vkCheck(vkBeginCommandBuffer(commandBuffer, &beginInfo));
+
+    VkBufferCopy copyRegion {
+        .srcOffset = 0,
+        .dstOffset = 0,
+        .size = size
+    };
+    vkCmdCopyBuffer(commandBuffer, srcBuffer.buffer, dstBuffer.buffer, 1, &copyRegion);
+    vkCheck(vkEndCommandBuffer(commandBuffer));
+
+    VkSubmitInfo submitInfo {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &commandBuffer
+    };
+    vkCheck(vkQueueSubmit(device.queue, 1, &submitInfo, VK_NULL_HANDLE));
+    
+    vkCheck(vkQueueWaitIdle(device.queue));
+    vkFreeCommandBuffers(device.device, commandPool, 1, &commandBuffer);
+}
