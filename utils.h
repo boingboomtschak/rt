@@ -177,7 +177,7 @@ void destroyBuffer(Device device, Buffer buffer) {
     vkFreeMemory(device.device, buffer.memory, nullptr);
 }
 
-VkDeviceAddress getBufferDeviceAddress(VkDevice device, VkBuffer buffer) {
+VkDeviceAddress getBufferDeviceAddress(Device device, Buffer buffer) {
     VkBufferDeviceAddressInfo bufferDeviceAddressInfo {
         .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
         .buffer = buffer.buffer

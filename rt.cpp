@@ -148,9 +148,32 @@ void Context::initialize() {
         .queueCount = 1,
         .pQueuePriorities = &queuePriority
     };
+
+    VkPhysicalDeviceRayTracingPipelineFeaturesKHR rayTracingPipelineFeatures {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR,
+        .rayTracingPipeline = VK_TRUE,
+        .rayTraversalPrimitiveCulling = VK_TRUE
+    };
+
+    VkPhysicalDeviceAccelerationStructureFeaturesKHR accelerationStructureFeatures {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR,
+        .pNext = &rayTracingPipelineFeatures,
+        .accelerationStructure = VK_TRUE
+    };
+
+    VkPhysicalDeviceFeatures deviceFeatures {
+        .shaderInt64 = VK_TRUE
+    };
+
+    VkPhysicalDeviceFeatures2 deviceFeatures2 {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+        .pNext = &accelerationStructureFeatures,
+        .features = deviceFeatures
+    };
     
     VkDeviceCreateInfo deviceCI {
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+        .pNext = &deviceFeatures2,
         .queueCreateInfoCount = 1,
         .pQueueCreateInfos = &queueCI,
         .enabledExtensionCount = (uint32_t)deviceExtensions.size(),
@@ -270,13 +293,74 @@ void Context::createAccelerationStructures() {
         VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, 
         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, accelerationBuffer);
 
-    VkDeviceAddress accelerationBufferAddress = getBufferDeviceAddress(device, accelerationBuffer);
+    VkAccelerationStructureCreateInfoKHR accelerationStructureCI {
+        .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
+        .buffer = accelerationBuffer.buffer,
+        .size = accelerationStructureBuildSizesInfo.accelerationStructureSize,
+        .type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR
+    };
 
+    vkCheck(vkCreateAccelerationStructureKHR(device.device, &accelerationStructureCI, nullptr, &accelerationStructure));
+
+    VkAccelerationStructureDeviceAddressInfoKHR accelerationStructureDeviceAddressInfo  {
+        .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
+        .accelerationStructure = accelerationStructure
+    };
+    VkDeviceAddress accelerationStructureDeviceAddress = vkGetAccelerationStructureDeviceAddressKHR(device.device, &accelerationStructureDeviceAddressInfo);
     
+    Buffer scratchBuffer;
+    createBuffer(device, accelerationStructureBuildSizesInfo.buildScratchSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, scratchBuffer);
+
+    VkDeviceAddress scratchBufferAddress = getBufferDeviceAddress(device, scratchBuffer);
+
+    accelerationStructureBuildGeometryInfo.dstAccelerationStructure = accelerationStructure;
+    accelerationStructureBuildGeometryInfo.scratchData = { .deviceAddress = scratchBufferAddress };
+
+    VkCommandBufferAllocateInfo allocInfo {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool = commandPool,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = 1
+    };
+    VkCommandBuffer commandBuffer;
+    vkCheck(vkAllocateCommandBuffers(device.device, &allocInfo, &commandBuffer));
+    VkCommandBufferBeginInfo beginInfo {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
+    };
+    vkCheck(vkBeginCommandBuffer(commandBuffer, &beginInfo));
+
+    VkAccelerationStructureBuildRangeInfoKHR accelerationStructureBuildRangeInfo {
+        .primitiveCount = primitiveCount,
+        .primitiveOffset = 0,
+        .firstVertex = 0,
+        .transformOffset = 0
+    };
+
+    const VkAccelerationStructureBuildRangeInfoKHR* pAccelerationStructureBuildRangeInfos = &accelerationStructureBuildRangeInfo;
+    vkCmdBuildAccelerationStructuresKHR(commandBuffer, 1, &accelerationStructureBuildGeometryInfo, &pAccelerationStructureBuildRangeInfos);
+
+    vkCheck(vkEndCommandBuffer(commandBuffer));
+
+    VkSubmitInfo submitInfo {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &commandBuffer
+    };
+
+    vkCheck(vkQueueSubmit(device.queue, 1, &submitInfo, VK_NULL_HANDLE));
+    vkCheck(vkQueueWaitIdle(device.queue));
+
+    vkFreeCommandBuffers(device.device, commandPool, 1, &commandBuffer);
+
+    destroyBuffer(device, scratchBuffer);
 }
 
 void Context::destroy() {
     vkDestroySurfaceKHR(instance, surface, nullptr);
+    vkDestroyAccelerationStructureKHR(device.device, accelerationStructure, nullptr);
+    destroyBuffer(device, vertexBuffer);
+    destroyBuffer(device, indexBuffer);
     vkDestroyCommandPool(device.device, commandPool, nullptr);
     glfwDestroyWindow(window);
     vkDestroyDevice(device.device, nullptr);
