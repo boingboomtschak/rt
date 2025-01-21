@@ -151,23 +151,34 @@ struct Buffer {
     VkDeviceMemory memory;
 };
 
-void createBuffer(Device device, VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, Buffer& buffer) {
+void createBuffer(Device device, VkDeviceSize size, Buffer& buffer, VkBufferUsageFlags usage, bool deviceLocal = true, bool deviceAddress = true) {
     VkBufferCreateInfo bufferCI {
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         .size = size,
         .usage = usage,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE
     };
+    if (deviceAddress) bufferCI.usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+
     vkCheck(vkCreateBuffer(device.device, &bufferCI, nullptr, &buffer.buffer));
     
     VkMemoryRequirements memRequirements;
     vkGetBufferMemoryRequirements(device.device, buffer.buffer, &memRequirements);
 
+    VkMemoryPropertyFlags properties = deviceLocal ? VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT : VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+
+    VkMemoryAllocateFlagsInfo allocFlagsInfo { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO };
+    if (deviceAddress) allocFlagsInfo.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+
     VkMemoryAllocateInfo allocInfo {
         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .pNext = &allocFlagsInfo,
         .allocationSize = memRequirements.size,
         .memoryTypeIndex = findMemoryType(device.physicalDevice, memRequirements.memoryTypeBits, properties)
     };
+
+
+
     vkCheck(vkAllocateMemory(device.device, &allocInfo, nullptr, &buffer.memory));
     vkCheck(vkBindBufferMemory(device.device, buffer.buffer, buffer.memory, 0));
 }
@@ -218,4 +229,28 @@ void copyBuffer(Device device, VkCommandPool commandPool, Buffer srcBuffer, Buff
     
     vkCheck(vkQueueWaitIdle(device.queue));
     vkFreeCommandBuffers(device.device, commandPool, 1, &commandBuffer);
+}
+
+std::vector<char> readFile(const std::string& filename) {
+    std::ifstream file(filename, std::ios::ate | std::ios::binary);
+    if (!file.is_open()) {
+        throw std::runtime_error("Failed to open file!");
+    }
+    size_t fileSize = (size_t)file.tellg();
+    std::vector<char> buffer(fileSize);
+    file.seekg(0);
+    file.read(buffer.data(), fileSize);
+    file.close();
+    return buffer;
+}
+
+VkShaderModule createShaderModule(Device device, std::vector<char> shaderCode) {
+    VkShaderModule shaderModule;
+    VkShaderModuleCreateInfo shaderModuleCreateInfo {
+        .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+        .codeSize = shaderCode.size(),
+        .pCode = (const uint32_t*)(shaderCode.data())
+    };
+    vkCheck(vkCreateShaderModule(device.device, &shaderModuleCreateInfo, nullptr, &shaderModule));
+    return shaderModule;
 }
