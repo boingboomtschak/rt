@@ -264,6 +264,7 @@ struct Swapchain {
     std::vector<VkImageView> imageViews;
     std::vector<VkFramebuffer> framebuffers;
     void create(Device device, GLFWwindow* window, VkSurfaceKHR surface);
+    void buildFramebuffers(Device device, VkRenderPass renderPass);
     void destroy(Device device);
 };
 
@@ -375,7 +376,9 @@ void Swapchain::create(Device device, GLFWwindow* window, VkSurfaceKHR surface) 
         };
         vkCheck(vkCreateImageView(device.device, &imageViewCI, nullptr, &imageViews[i]));
     }
+}
 
+void Swapchain::buildFramebuffers(Device device, VkRenderPass renderPass) {
     framebuffers.resize(imageViews.size());
     for (size_t i = 0; i < imageViews.size(); i++) {
         VkImageView attachments[] = {
@@ -383,14 +386,74 @@ void Swapchain::create(Device device, GLFWwindow* window, VkSurfaceKHR surface) 
         };
         VkFramebufferCreateInfo framebufferCI {
             .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
-            .renderPass = 
-        }
+            .renderPass = renderPass,
+            .attachmentCount = 1,
+            .pAttachments = attachments,
+            .width = extent.width,
+            .height = extent.height,
+            .layers = 1
+        };
+        vkCheck(vkCreateFramebuffer(device.device, &framebufferCI, nullptr, &framebuffers[i]));
     }
 }
 
 void Swapchain::destroy(Device device) {
+    if (framebuffers.size() > 0) {
+        for (VkFramebuffer framebuffer : framebuffers) {
+            vkDestroyFramebuffer(device.device, framebuffer, nullptr);
+        }
+    }
     for (VkImageView imageView : imageViews) {
         vkDestroyImageView(device.device, imageView, nullptr);
     }
     vkDestroySwapchainKHR(device.device, swapchain, nullptr);
+}
+
+VkDeviceSize alignedSize(VkDeviceSize value, VkDeviceSize alignment) {
+    return (value + alignment - 1) & ~(alignment - 1);
+}
+
+struct ShaderBindingTable {
+    Buffer buffer;
+    VkStridedDeviceAddressRegionKHR rgenSBTEntry;
+    VkStridedDeviceAddressRegionKHR hitGroupSBTEntry;
+    VkStridedDeviceAddressRegionKHR missSBTEntry;
+    VkStridedDeviceAddressRegionKHR callableSBTEntry;
+    void create(Device device, VkPipeline rtPipeline, std::vector<VkRayTracingShaderGroupCreateInfoKHR> rtShaderGroups);
+    void destroy(Device device);
+};
+
+void ShaderBindingTable::create(Device device, VkPipeline rtPipeline, std::vector<VkRayTracingShaderGroupCreateInfoKHR> rtShaderGroups) {
+    VkPhysicalDeviceRayTracingPipelinePropertiesKHR rtProperties { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR };
+    VkPhysicalDeviceProperties2 devProp2 { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &rtProperties };
+    vkGetPhysicalDeviceProperties2(device.physicalDevice, &devProp2);
+
+    VkDeviceSize handleSize = rtProperties.shaderGroupHandleSize;
+    VkDeviceSize handleAlignment = rtProperties.shaderGroupBaseAlignment;
+    std::vector<uint8_t> shaderHandleStorage(rtShaderGroups.size() * handleSize);
+    vkCheck(vkGetRayTracingShaderGroupHandlesKHR(device.device, rtPipeline, 0, rtShaderGroups.size(), shaderHandleStorage.size(), shaderHandleStorage.data()));
+
+    VkDeviceSize sbtSize = handleSize * rtShaderGroups.size();
+    VkDeviceSize rgenOffset = 0;
+    VkDeviceSize hitGroupOffset = alignedSize(handleSize, handleAlignment);
+    VkDeviceSize missOffset = alignedSize(hitGroupOffset + handleSize, handleAlignment);
+    createBuffer(device, sbtSize, buffer, VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR | VK_BUFFER_USAGE_TRANSFER_DST_BIT, false);
+
+    void* data;
+    vkMapMemory(device.device, buffer.memory, 0, sbtSize, 0, &data);
+    memcpy((uint8_t*)data + rgenOffset, shaderHandleStorage.data(), handleSize);
+    memcpy((uint8_t*)data + hitGroupOffset, shaderHandleStorage.data() + handleSize, handleSize);
+    memcpy((uint8_t*)data + missOffset, shaderHandleStorage.data() + handleSize * 2, handleSize);
+    vkUnmapMemory(device.device, buffer.memory);
+
+    VkDeviceAddress devAddress = getBufferDeviceAddress(device, buffer);
+
+    rgenSBTEntry = { .deviceAddress = devAddress + rgenOffset, .stride = handleSize, .size = handleSize };
+    hitGroupSBTEntry = { .deviceAddress = devAddress + hitGroupOffset, .stride = handleSize, .size = handleSize };
+    missSBTEntry = { .deviceAddress = devAddress + missOffset, .stride = handleSize, .size = handleSize };
+    callableSBTEntry = {};
+}
+
+void ShaderBindingTable::destroy(Device device) {
+    destroyBuffer(device, buffer);
 }

@@ -41,7 +41,9 @@ struct Context {
     VkDescriptorSetLayout rtDescriptorSetLayout;
     VkDescriptorPool rtDescriptorPool;
     VkDescriptorSet rtDescriptorSet;
+    VkPipelineLayout rtPipelineLayout;
     VkPipeline rtPipeline;
+    ShaderBindingTable rtSBT;
     Scene scene;
     Buffer vertexBuffer;
     Buffer indexBuffer;
@@ -443,8 +445,7 @@ void Context::createRTPipeline() {
         .pSetLayouts = &rtDescriptorSetLayout,
         // TODO need to figure out push constant range here
     };
-    VkPipelineLayout pipelineLayout;
-    vkCheck(vkCreatePipelineLayout(device.device, &pipelineLayoutCreateInfo, nullptr, &pipelineLayout));
+    vkCheck(vkCreatePipelineLayout(device.device, &pipelineLayoutCreateInfo, nullptr, &rtPipelineLayout));
 
     VkShaderModule rgenShader = createShaderModule(device, readFile("shaders/gen.spv"));
     VkShaderModule chitShader = createShaderModule(device, readFile("shaders/chit.spv"));
@@ -470,7 +471,7 @@ void Context::createRTPipeline() {
         }
     };
 
-    std::vector<VkRayTracingShaderGroupCreateInfoKHR> rayTracingShaderGroups {
+    std::vector<VkRayTracingShaderGroupCreateInfoKHR> rtShaderGroups {
         {
             .sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
             .type = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR,
@@ -501,23 +502,60 @@ void Context::createRTPipeline() {
         .sType = VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR,
         .stageCount = (uint32_t)shaderStages.size(),
         .pStages = shaderStages.data(),
-        .groupCount = (uint32_t)rayTracingShaderGroups.size(),
-        .pGroups = rayTracingShaderGroups.data(),
-        .layout = pipelineLayout,
+        .groupCount = (uint32_t)rtShaderGroups.size(),
+        .pGroups = rtShaderGroups.data(),
+        .layout = rtPipelineLayout,
     };
     vkCheck(vkCreateRayTracingPipelinesKHR(device.device, VK_NULL_HANDLE, VK_NULL_HANDLE, 1, &rayTracingPipelineCI, nullptr, &rtPipeline));
 
     vkDestroyShaderModule(device.device, rgenShader, nullptr);
     vkDestroyShaderModule(device.device, chitShader, nullptr);
     vkDestroyShaderModule(device.device, missShader, nullptr);
-    vkDestroyPipelineLayout(device.device, pipelineLayout, nullptr);
+
+    rtSBT.create(device, rtPipeline, rtShaderGroups);
 }
 
 void Context::render() {
+    VkCommandBufferAllocateInfo allocInfo {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool = commandPool,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = 1
+    };
+    VkCommandBuffer commandBuffer;
+    vkCheck(vkAllocateCommandBuffers(device.device, &allocInfo, &commandBuffer));
+    VkCommandBufferBeginInfo beginInfo {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
+    };
+    vkCheck(vkBeginCommandBuffer(commandBuffer, &beginInfo));
 
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, rtPipeline);
+    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, rtPipelineLayout, 0, 1, &rtDescriptorSet, 0, nullptr);
+    vkCmdTraceRaysKHR(commandBuffer, 
+        &rtSBT.rgenSBTEntry, 
+        &rtSBT.missSBTEntry, 
+        &rtSBT.hitGroupSBTEntry, 
+        &rtSBT.callableSBTEntry, // unused
+        swapchain.extent.width, swapchain.extent.height, 1);
+
+    vkCheck(vkEndCommandBuffer(commandBuffer));
+
+    VkSubmitInfo submitInfo {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &commandBuffer
+    };
+
+    vkCheck(vkQueueSubmit(device.queue, 1, &submitInfo, VK_NULL_HANDLE));
+    vkCheck(vkQueueWaitIdle(device.queue));
+
+    vkFreeCommandBuffers(device.device, commandPool, 1, &commandBuffer);
 }
 
 void Context::destroy() {
+    rtSBT.destroy(device);
+    vkDestroyPipelineLayout(device.device, rtPipelineLayout, nullptr);
     vkCheck(vkResetDescriptorPool(device.device, rtDescriptorPool, 0));
     vkDestroyDescriptorPool(device.device, rtDescriptorPool, nullptr);
     vkDestroyDescriptorSetLayout(device.device, rtDescriptorSetLayout, nullptr);
