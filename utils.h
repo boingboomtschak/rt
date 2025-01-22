@@ -144,6 +144,7 @@ struct Device {
     VkPhysicalDevice physicalDevice;
     VkDevice device;
     VkQueue queue;
+    uint32_t queueFamilyId;
 };
 
 struct Buffer {
@@ -231,7 +232,7 @@ void copyBuffer(Device device, VkCommandPool commandPool, Buffer srcBuffer, Buff
     vkFreeCommandBuffers(device.device, commandPool, 1, &commandBuffer);
 }
 
-std::vector<char> readFile(const std::string& filename) {
+std::vector<char> readFile(const std::string &filename) {
     std::ifstream file(filename, std::ios::ate | std::ios::binary);
     if (!file.is_open()) {
         throw std::runtime_error("Failed to open file!");
@@ -253,4 +254,143 @@ VkShaderModule createShaderModule(Device device, std::vector<char> shaderCode) {
     };
     vkCheck(vkCreateShaderModule(device.device, &shaderModuleCreateInfo, nullptr, &shaderModule));
     return shaderModule;
+}
+
+struct Swapchain {
+    VkSwapchainKHR swapchain;
+    std::vector<VkImage> images;
+    VkFormat imageFormat;
+    VkExtent2D extent;
+    std::vector<VkImageView> imageViews;
+    std::vector<VkFramebuffer> framebuffers;
+    void create(Device device, GLFWwindow* window, VkSurfaceKHR surface);
+    void destroy(Device device);
+};
+
+VkSurfaceFormatKHR chooseSwapSurfaceFormat(const std::vector<VkSurfaceFormatKHR> &availableFormats) {
+    for (const VkSurfaceFormatKHR &availableFormat : availableFormats) {
+        if (availableFormat.format == VK_FORMAT_B8G8R8A8_SRGB && availableFormat.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+            return availableFormat;
+        }
+    }
+    return availableFormats[0];
+}
+
+VkPresentModeKHR chooseSwapPresentMode(const std::vector<VkPresentModeKHR> &availablePresentModes) {
+    for (const VkPresentModeKHR &availablePresentMode : availablePresentModes) {
+        if (availablePresentMode == VK_PRESENT_MODE_MAILBOX_KHR) {
+            return availablePresentMode;
+        }
+    }
+    return VK_PRESENT_MODE_FIFO_KHR;
+}
+
+VkExtent2D chooseSwapExtent(const VkSurfaceCapabilitiesKHR &capabilities, GLFWwindow* window) {
+    if (capabilities.currentExtent.width != std::numeric_limits<uint32_t>::max()) {
+        return capabilities.currentExtent;
+    } else {
+        int width, height;
+        glfwGetFramebufferSize(window, &width, &height);
+        VkExtent2D actualExtent = {
+            (uint32_t)width,
+            (uint32_t)height
+        };
+        actualExtent.width = std::clamp(actualExtent.width, capabilities.minImageExtent.width, capabilities.maxImageExtent.width);
+        actualExtent.height = std::clamp(actualExtent.height, capabilities.minImageExtent.height, capabilities.maxImageExtent.height);
+        return actualExtent;
+    }
+}
+
+void Swapchain::create(Device device, GLFWwindow* window, VkSurfaceKHR surface) {
+    uint32_t formatCount;
+    vkGetPhysicalDeviceSurfaceFormatsKHR(device.physicalDevice, surface, &formatCount, nullptr);
+    std::vector<VkSurfaceFormatKHR> formats(formatCount);
+    vkGetPhysicalDeviceSurfaceFormatsKHR(device.physicalDevice, surface, &formatCount, formats.data());
+
+    uint32_t presentModeCount;
+    vkGetPhysicalDeviceSurfacePresentModesKHR(device.physicalDevice, surface, &presentModeCount, nullptr);
+    std::vector<VkPresentModeKHR> presentModes(presentModeCount);
+    vkGetPhysicalDeviceSurfacePresentModesKHR(device.physicalDevice, surface, &presentModeCount, presentModes.data());
+
+    VkSurfaceCapabilitiesKHR capabilities;
+    vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device.physicalDevice, surface, &capabilities);
+
+    assert(!formats.empty() && !presentModes.empty());
+
+    VkSurfaceFormatKHR surfaceFormat = chooseSwapSurfaceFormat(formats);
+    imageFormat = surfaceFormat.format;
+    VkPresentModeKHR presentMode = chooseSwapPresentMode(presentModes);
+    extent = chooseSwapExtent(capabilities, window);
+
+    uint32_t imageCount = capabilities.minImageCount + 1;
+    if (capabilities.maxImageCount > 0 && imageCount > capabilities.maxImageCount) {
+        imageCount = capabilities.maxImageCount;
+    }
+    
+    VkSwapchainCreateInfoKHR swapchainCI {
+        .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+        .surface = surface,
+        .minImageCount = imageCount,
+        .imageFormat = imageFormat,
+        .imageColorSpace = surfaceFormat.colorSpace,
+        .imageExtent = extent,
+        .imageArrayLayers = 1,
+        .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+        .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 1,
+        .pQueueFamilyIndices = &device.queueFamilyId,
+        .preTransform = capabilities.currentTransform,
+        .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+        .presentMode = presentMode,
+        .clipped = VK_TRUE,
+        .oldSwapchain = VK_NULL_HANDLE
+    };
+
+    vkCheck(vkCreateSwapchainKHR(device.device, &swapchainCI, nullptr, &swapchain));
+
+    vkCheck(vkGetSwapchainImagesKHR(device.device, swapchain, &imageCount, nullptr));
+    images.resize(imageCount);
+    vkCheck(vkGetSwapchainImagesKHR(device.device, swapchain, &imageCount, images.data()));
+    
+    imageViews.resize(images.size());
+    for (size_t i = 0; i < images.size(); i++) {
+        VkImageViewCreateInfo imageViewCI {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .image = images[i],
+            .viewType = VK_IMAGE_VIEW_TYPE_2D,
+            .format = imageFormat,
+            .components = {
+                .r = VK_COMPONENT_SWIZZLE_IDENTITY,
+                .g = VK_COMPONENT_SWIZZLE_IDENTITY,
+                .b = VK_COMPONENT_SWIZZLE_IDENTITY,
+                .a = VK_COMPONENT_SWIZZLE_IDENTITY
+            },
+            .subresourceRange = {
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1
+            }
+        };
+        vkCheck(vkCreateImageView(device.device, &imageViewCI, nullptr, &imageViews[i]));
+    }
+
+    framebuffers.resize(imageViews.size());
+    for (size_t i = 0; i < imageViews.size(); i++) {
+        VkImageView attachments[] = {
+            imageViews[i]
+        };
+        VkFramebufferCreateInfo framebufferCI {
+            .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+            .renderPass = 
+        }
+    }
+}
+
+void Swapchain::destroy(Device device) {
+    for (VkImageView imageView : imageViews) {
+        vkDestroyImageView(device.device, imageView, nullptr);
+    }
+    vkDestroySwapchainKHR(device.device, swapchain, nullptr);
 }

@@ -5,6 +5,8 @@
 #include <fstream>
 #include <vector>
 #include <string>
+#include <limits>
+#include <algorithm>
 
 #include "volk/volk.h"
 #include <GLFW/glfw3.h>
@@ -34,6 +36,7 @@ struct Context {
     Device device;
     VkCommandPool commandPool;
     VkSurfaceKHR surface;
+    Swapchain swapchain;
     VkAccelerationStructureKHR accelerationStructure;
     VkDescriptorSetLayout rtDescriptorSetLayout;
     VkDescriptorPool rtDescriptorPool;
@@ -74,6 +77,7 @@ void Context::initialize() {
     deviceExtensions.push_back("VK_KHR_deferred_host_operations");
     deviceExtensions.push_back("VK_KHR_acceleration_structure");
     deviceExtensions.push_back("VK_KHR_ray_tracing_pipeline");
+    deviceExtensions.push_back("VK_KHR_swapchain");
 
     uint32_t numRequiredInstanceExtensions = 0;
     const char** requiredInstanceExtensions = glfwGetRequiredInstanceExtensions(&numRequiredInstanceExtensions);
@@ -155,6 +159,8 @@ void Context::initialize() {
         exit(1);
     }
 
+    device.queueFamilyId = queueFamilyId;
+
     float queuePriority = 1.0f;
     VkDeviceQueueCreateInfo queueCI {
         .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
@@ -218,6 +224,8 @@ void Context::initialize() {
     glfwSetKeyCallback(window, handleKeys);
 
     vkCheck(glfwCreateWindowSurface(instance, window, nullptr, &surface));
+
+    swapchain.create(device, window, surface);
 }
 
 void Context::loadScene() {
@@ -514,6 +522,7 @@ void Context::destroy() {
     vkDestroyDescriptorPool(device.device, rtDescriptorPool, nullptr);
     vkDestroyDescriptorSetLayout(device.device, rtDescriptorSetLayout, nullptr);
     vkDestroyPipeline(device.device, rtPipeline, nullptr);
+    swapchain.destroy(device);
     vkDestroySurfaceKHR(instance, surface, nullptr);
     vkDestroyAccelerationStructureKHR(device.device, accelerationStructure, nullptr);
     destroyBuffer(device, accelerationBuffer);
